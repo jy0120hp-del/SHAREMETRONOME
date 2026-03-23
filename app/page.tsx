@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
 import { createClient } from '@supabase/supabase-js';
 
+// Supabase 직접 연결 (Vercel 빌드 에러 방지)
 const supabase = createClient(
   'https://tbypnzqvntghyatakdzc.supabase.co', 
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRieXBuenF2bnRnaHlhdGFrZHpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNzk2NTQsImV4cCI6MjA4OTg1NTY1NH0._eByvyWTFXf_1_bEIhz3a207GrKhCoafMJGTwUD6yL8'
@@ -36,25 +37,20 @@ export default function MetronomePage() {
     if (audioCtx.current.state === 'suspended') await audioCtx.current.resume();
   };
 
-  // 🔔 [핵심 수정] Pusher 이벤트를 받으면 config를 업데이트하고, 
-  // 아래의 별도 useEffect에서 소리를 제어함
+  // 실시간 Pusher 이벤트 감시
   useEffect(() => {
     if (!joined || !room) return;
     if (!pusherRef.current) pusherRef.current = new Pusher("48da82b32a9dc96e8fbe", { cluster: "ap3" });
     const channel = pusherRef.current.subscribe(`team-${room}`);
     
     channel.bind('sync-event', (data: any) => {
-      setConfig({ 
-        bpm: Number(data.bpm), 
-        isPlaying: data.isPlaying, 
-        startTime: data.startTime 
-      });
+      setConfig({ bpm: Number(data.bpm), isPlaying: data.isPlaying, startTime: data.startTime });
     });
 
     return () => { pusherRef.current?.unsubscribe(`team-${room}`); };
   }, [joined, room]);
 
-  // 🔊 [상태 감시자] config가 변하면(남이 눌렀든 내가 눌렀든) 무조건 소리를 맞춤
+  // 소리 제어 감시자
   useEffect(() => {
     if (joined && config.isPlaying) {
       startSyncedAudio(config);
@@ -66,17 +62,14 @@ export default function MetronomePage() {
   const startSyncedAudio = (c: any) => {
     stopAudio(); 
     if (!audioCtx.current) return;
-
     const secondsPerBeat = 60 / c.bpm;
     const scheduler = () => {
       const serverNow = Date.now() / 1000;
       const elapsed = serverNow - c.startTime;
       const beatsElapsed = Math.floor(elapsed / secondsPerBeat);
       const timeUntilNextBeat = ((beatsElapsed + 1) * secondsPerBeat) - elapsed;
-      
       nextBeatTimeRef.current = audioCtx.current!.currentTime + timeUntilNextBeat;
       let beatCounter = (beatsElapsed + 1) % 4;
-
       const run = () => {
         while (nextBeatTimeRef.current < audioCtx.current!.currentTime + 0.1) {
           playTick(nextBeatTimeRef.current, beatCounter);
@@ -110,28 +103,31 @@ export default function MetronomePage() {
 
   const send = async (newParams: any) => {
     await unlockAudio();
-    
-    // 현재 상태와 변경될 상태를 합침
     const nextIsPlaying = newParams.isPlaying !== undefined ? newParams.isPlaying : config.isPlaying;
     const nextBpm = newParams.bpm !== undefined ? newParams.bpm : config.bpm;
-    
-    // 만약 정지 상태에서 재생을 누르는 거라면 새로운 startTime 생성
     let nextStartTime = config.startTime;
-    if (!config.isPlaying && nextIsPlaying) {
-      nextStartTime = Date.now() / 1000;
-    } else if (!nextIsPlaying) {
-      nextStartTime = 0;
-    }
+    if (!config.isPlaying && nextIsPlaying) nextStartTime = Date.now() / 1000;
+    else if (!nextIsPlaying) nextStartTime = 0;
 
     const updated = { bpm: nextBpm, isPlaying: nextIsPlaying, startTime: nextStartTime };
-
-    // DB 업데이트
-    await supabase.from('rooms').update({ 
-      bpm: updated.bpm, is_playing: updated.isPlaying, start_time: updated.startTime 
-    }).eq('name', room);
-
-    // Pusher 알림
+    await supabase.from('rooms').update({ bpm: updated.bpm, is_playing: updated.isPlaying, start_time: updated.startTime }).eq('name', room);
     await fetch('/api/sync', { method: 'POST', body: JSON.stringify({ ...updated, teamId: room }) });
+  };
+
+  const joinRoom = async (selectedRoom: any) => {
+    await unlockAudio();
+    setRoom(selectedRoom.name);
+    setJoined(true);
+    setConfig({ bpm: selectedRoom.bpm, isPlaying: selectedRoom.is_playing, startTime: selectedRoom.start_time });
+  };
+
+  // 🗑️ 방 삭제 함수
+  const deleteRoom = async (e: React.MouseEvent, roomName: string) => {
+    e.stopPropagation(); // 카드 클릭(입장) 이벤트 방지
+    if (confirm(`'${roomName}' 팀을 삭제할까?`)) {
+      await supabase.from('rooms').delete().eq('name', roomName);
+      fetchRooms();
+    }
   };
 
   if (!joined) {
@@ -144,9 +140,13 @@ export default function MetronomePage() {
             <button onClick={() => supabase.from('rooms').insert([{ name: room, bpm: 80, is_playing: false, start_time: 0 }]).then(fetchRooms)} style={{ background: '#212529', color: '#FFF', border: 'none', padding: '10px 20px', borderRadius: '4px', cursor: 'pointer' }}>CREATE</button>
           </div>
           {rooms.map(r => (
-            <div key={r.id} onClick={() => joinRoom(r)} style={{ background: '#FFF', padding: '20px', borderRadius: '12px', marginBottom: '10px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', border: '1px solid #E9ECEF' }}>
+            <div key={r.id} onClick={() => joinRoom(r)} style={{ background: '#FFF', padding: '20px', borderRadius: '12px', marginBottom: '10px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid #E9ECEF', position: 'relative' }}>
               <span style={{ fontWeight: '700' }}>{r.name}</span>
-              <span style={{ color: r.is_playing ? '#40C057' : '#ADB5BD', fontSize: '12px', fontWeight: 'bold' }}>{r.is_playing ? '● ON' : 'OFF'}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                <span style={{ color: r.is_playing ? '#40C057' : '#ADB5BD', fontSize: '12px', fontWeight: 'bold' }}>{r.is_playing ? '● ON' : 'OFF'}</span>
+                {/* 🗑️ 삭제 버튼 */}
+                <button onClick={(e) => deleteRoom(e, r.name)} style={{ background: 'none', border: 'none', color: '#FF6B6B', fontSize: '18px', cursor: 'pointer', padding: '0 5px' }}>×</button>
+              </div>
             </div>
           ))}
         </div>
