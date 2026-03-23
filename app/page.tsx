@@ -3,7 +3,6 @@ import { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
 import { createClient } from '@supabase/supabase-js';
 
-// Supabase 직접 연결 (Vercel 빌드 에러 방지)
 const supabase = createClient(
   'https://tbypnzqvntghyatakdzc.supabase.co', 
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRieXBuenF2bnRnaHlhdGFrZHpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNzk2NTQsImV4cCI6MjA4OTg1NTY1NH0._eByvyWTFXf_1_bEIhz3a207GrKhCoafMJGTwUD6yL8'
@@ -37,39 +36,47 @@ export default function MetronomePage() {
     if (audioCtx.current.state === 'suspended') await audioCtx.current.resume();
   };
 
-  const joinRoom = async (selectedRoom: any) => {
-    await unlockAudio();
-    setRoom(selectedRoom.name);
-    setJoined(true);
-    const syncConfig = { bpm: selectedRoom.bpm, isPlaying: selectedRoom.is_playing, startTime: selectedRoom.start_time };
-    setConfig(syncConfig);
-    if (syncConfig.isPlaying) startSyncedAudio(syncConfig);
-  };
-
+  // 🔔 [핵심 수정] Pusher 이벤트를 받으면 config를 업데이트하고, 
+  // 아래의 별도 useEffect에서 소리를 제어함
   useEffect(() => {
     if (!joined || !room) return;
     if (!pusherRef.current) pusherRef.current = new Pusher("48da82b32a9dc96e8fbe", { cluster: "ap3" });
     const channel = pusherRef.current.subscribe(`team-${room}`);
     
     channel.bind('sync-event', (data: any) => {
-      const newConfig = { bpm: Number(data.bpm), isPlaying: data.isPlaying, startTime: data.startTime };
-      setConfig(newConfig);
-      if (newConfig.isPlaying) startSyncedAudio(newConfig); else stopAudio();
+      setConfig({ 
+        bpm: Number(data.bpm), 
+        isPlaying: data.isPlaying, 
+        startTime: data.startTime 
+      });
     });
 
-    return () => { stopAudio(); pusherRef.current?.unsubscribe(`team-${room}`); };
+    return () => { pusherRef.current?.unsubscribe(`team-${room}`); };
   }, [joined, room]);
 
+  // 🔊 [상태 감시자] config가 변하면(남이 눌렀든 내가 눌렀든) 무조건 소리를 맞춤
+  useEffect(() => {
+    if (joined && config.isPlaying) {
+      startSyncedAudio(config);
+    } else {
+      stopAudio();
+    }
+  }, [config.isPlaying, config.bpm, config.startTime, joined]);
+
   const startSyncedAudio = (c: any) => {
-    stopAudio();
+    stopAudio(); 
+    if (!audioCtx.current) return;
+
     const secondsPerBeat = 60 / c.bpm;
     const scheduler = () => {
       const serverNow = Date.now() / 1000;
       const elapsed = serverNow - c.startTime;
       const beatsElapsed = Math.floor(elapsed / secondsPerBeat);
       const timeUntilNextBeat = ((beatsElapsed + 1) * secondsPerBeat) - elapsed;
+      
       nextBeatTimeRef.current = audioCtx.current!.currentTime + timeUntilNextBeat;
       let beatCounter = (beatsElapsed + 1) % 4;
+
       const run = () => {
         while (nextBeatTimeRef.current < audioCtx.current!.currentTime + 0.1) {
           playTick(nextBeatTimeRef.current, beatCounter);
@@ -86,10 +93,9 @@ export default function MetronomePage() {
   };
 
   const playTick = (t: number, b: number) => {
-    if (!audioCtx.current) return;
-    const osc = audioCtx.current.createOscillator();
-    const g = audioCtx.current.createGain();
-    osc.connect(g); g.connect(audioCtx.current.destination);
+    const osc = audioCtx.current!.createOscillator();
+    const g = audioCtx.current!.createGain();
+    osc.connect(g); g.connect(audioCtx.current!.destination);
     osc.frequency.setValueAtTime(b === 0 ? 880 : 440, t);
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(0.2, t + 0.005);
@@ -102,19 +108,29 @@ export default function MetronomePage() {
     setCurrentBeat(-1);
   };
 
-  const send = async (v: any) => {
+  const send = async (newParams: any) => {
     await unlockAudio();
-    const isNowPlaying = v.isPlaying !== undefined ? v.isPlaying : config.isPlaying;
-    const currentBpm = v.bpm !== undefined ? v.bpm : config.bpm;
-    const startTime = isNowPlaying ? (config.startTime || Date.now() / 1000) : 0;
     
-    const updated = { bpm: currentBpm, isPlaying: isNowPlaying, startTime: isNowPlaying ? (startTime || Date.now() / 1000) : 0 };
-    setConfig(updated);
+    // 현재 상태와 변경될 상태를 합침
+    const nextIsPlaying = newParams.isPlaying !== undefined ? newParams.isPlaying : config.isPlaying;
+    const nextBpm = newParams.bpm !== undefined ? newParams.bpm : config.bpm;
+    
+    // 만약 정지 상태에서 재생을 누르는 거라면 새로운 startTime 생성
+    let nextStartTime = config.startTime;
+    if (!config.isPlaying && nextIsPlaying) {
+      nextStartTime = Date.now() / 1000;
+    } else if (!nextIsPlaying) {
+      nextStartTime = 0;
+    }
 
+    const updated = { bpm: nextBpm, isPlaying: nextIsPlaying, startTime: nextStartTime };
+
+    // DB 업데이트
     await supabase.from('rooms').update({ 
       bpm: updated.bpm, is_playing: updated.isPlaying, start_time: updated.startTime 
     }).eq('name', room);
 
+    // Pusher 알림
     await fetch('/api/sync', { method: 'POST', body: JSON.stringify({ ...updated, teamId: room }) });
   };
 
