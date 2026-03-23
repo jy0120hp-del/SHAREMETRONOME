@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Band Sync Final</title>
+    <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
+    <style>
+        body { background: #1A1A1D; color: white; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; overflow: hidden; }
+        .card { background: #252529; padding: 40px; border-radius: 40px; text-align: center; width: 320px; border: 1px solid #333; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+        .bpm { font-size: 80px; font-weight: 100; margin: 10px 0; color: #b3ff00; }
+        input[type=range] { width: 100%; accent-color: #b3ff00; margin: 20px 0; cursor: pointer; }
+        .play-btn { width: 80px; height: 80px; border-radius: 50%; border: 2px solid white; background: transparent; color: white; cursor: pointer; font-size: 24px; transition: 0.2s; outline: none; }
+        .play-btn.active { border-color: #b3ff00; color: #b3ff00; background: rgba(179,255,0,0.1); }
+        
+        /* 박자 동그라미 스타일 */
+        .dots { display: flex; justify-content: center; gap: 15px; margin-bottom: 25px; }
+        .dot { width: 45px; height: 45px; border-radius: 50%; border: 2px solid #b3ff00; display: flex; align-items: center; justify-content: center; transition: 0.1s; color: #b3ff00; font-weight: bold; }
+        .dot.active { background: #b3ff00; color: black; box-shadow: 0 0 15px #b3ff00; }
+
+        .lobby-input { padding: 15px; margin: 20px; border-radius: 10px; border: none; width: 200px; text-align: center; font-size: 16px; background: #eee; color: #000; }
+        .start-btn { background: #b3ff00; color: black; border: none; padding: 15px 40px; border-radius: 10px; font-weight: bold; cursor: pointer; font-size: 16px; }
+    </style>
+</head>
+<body>
+    <div id="lobby">
+        <h1 style="letter-spacing: 5px; font-weight: 100;">BAND SYNC</h1>
+        <input type="text" id="roomName" class="lobby-input" placeholder="Team Name (English)">
+        <br>
+        <button class="start-btn" onclick="joinSession()">JOIN SESSION</button>
+    </div>
+
+    <div id="metronome" style="display:none;">
+        <div class="card">
+            <div id="roomTitle" style="color:#888; font-size:12px; letter-spacing: 1px; margin-bottom: 20px;"></div>
+            
+            <div class="dots">
+                <div class="dot" id="dot0">^</div>
+                <div class="dot" id="dot1"></div>
+                <div class="dot" id="dot2"></div>
+                <div class="dot" id="dot3"></div>
+            </div>
+
+            <div class="bpm" id="bpmDisplay">80</div>
+            <div id="tempoName" style="color:#888; font-style: italic; margin-bottom: 10px;">Andantino</div>
+            <input type="range" id="slider" min="40" max="240" value="80" oninput="updateBPM(this.value)">
+            <br>
+            <button id="playBtn" class="play-btn" onclick="togglePlay()">▶</button>
+        </div>
+    </div>
+
+    <script>
+        let room = '', isPlaying = false, bpm = 80;
+        let audioCtx = null, timer = null, currentBeat = 0;
+        let pusher, channel;
+
+        function joinSession() {
+            room = document.getElementById('roomName').value.trim();
+            if(!room) { alert("방 이름을 입력해줘!"); return; }
+
+            document.getElementById('lobby').style.display = 'none';
+            document.getElementById('metronome').style.display = 'block';
+            document.getElementById('roomTitle').innerText = "SESSION: " + room.toUpperCase();
+
+            // Pusher 연결
+            if (typeof Pusher !== 'undefined') {
+                pusher = new Pusher("48da82b32a9dc96e8fbe", { cluster: "ap3" });
+                channel = pusher.subscribe('team-' + room);
+                channel.bind('sync-event', function(data) {
+                    bpm = data.bpm; isPlaying = data.isPlaying;
+                    syncUI();
+                    if(isPlaying) startAudio(); else stopAudio();
+                });
+            }
+        }
+
+        function updateBPM(val) {
+            bpm = val;
+            syncUI();
+            if(isPlaying) startAudio(); // BPM 바뀌면 소리 타이밍 재설정
+            sendData();
+        }
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            syncUI();
+            if(isPlaying) startAudio(); else stopAudio();
+            sendData();
+        }
+
+        // --- 핵심: 소리 & 박자 애니메이션 ---
+        function startAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            stopAudio();
+            currentBeat = 0;
+            let nextNoteTime = audioCtx.currentTime;
+
+            function scheduler() {
+                while (nextNoteTime < audioCtx.currentTime + 0.1) {
+                    playClick(nextNoteTime, currentBeat);
+                    nextNoteTime += 60 / bpm;
+                    currentBeat = (currentBeat + 1) % 4;
+                }
+                timer = setTimeout(scheduler, 25);
+            }
+            scheduler();
+        }
+
+        function playClick(time, beat) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            
+            // 첫 박자만 높은 음
+            osc.frequency.value = (beat === 0) ? 880 : 440;
+            osc.start(time); osc.stop(time + 0.05);
+
+            // 화면 동그라미 불 켜기
+            setTimeout(() => {
+                document.querySelectorAll('.dot').forEach(d => d.classList.remove('active'));
+                document.getElementById('dot' + beat).classList.add('active');
+            }, (time - audioCtx.currentTime) * 1000);
+        }
+
+        function stopAudio() {
+            clearTimeout(timer);
+            document.querySelectorAll('.dot').forEach(d => d.classList.remove('active'));
+        }
+
+        function syncUI() {
+            document.getElementById('bpmDisplay').innerText = bpm;
+            document.getElementById('slider').value = bpm;
+            document.getElementById('playBtn').innerText = isPlaying ? '■' : '▶';
+            document.getElementById('playBtn').className = isPlaying ? 'play-btn active' : 'play-btn';
+            let t = bpm < 60 ? "Largo" : (bpm > 120 ? "Allegro" : "Andantino");
+            document.getElementById('tempoName').innerText = t;
+        }
+
+        function sendData() {
+            fetch('/api/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bpm: bpm, isPlaying: isPlaying, teamId: room })
+            }).catch(() => {});
+        }
+    </script>
+</body>
+</html>
