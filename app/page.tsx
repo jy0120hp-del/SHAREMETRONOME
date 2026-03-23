@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
 import { createClient } from '@supabase/supabase-js';
 
-// Supabase 클라이언트 초기화
+// Supabase 직접 연결 (Vercel 빌드 에러 방지)
 const supabase = createClient(
   'https://tbypnzqvntghyatakdzc.supabase.co', 
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRieXBuenF2bnRnaHlhdGFrZHpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQyNzk2NTQsImV4cCI6MjA4OTg1NTY1NH0._eByvyWTFXf_1_bEIhz3a207GrKhCoafMJGTwUD6yL8'
@@ -28,47 +28,33 @@ export default function MetronomePage() {
 
   useEffect(() => {
     fetchRooms();
-    const channel = supabase.channel('db-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, () => fetchRooms())
-      .subscribe();
+    const channel = supabase.channel('db-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, () => fetchRooms()).subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  // 🔊 오디오를 강제로 깨우는 핵심 함수
   const unlockAudio = async () => {
-    if (!audioCtx.current) {
-      audioCtx.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    if (audioCtx.current.state === 'suspended') {
-      await audioCtx.current.resume();
-    }
+    if (!audioCtx.current) audioCtx.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (audioCtx.current.state === 'suspended') await audioCtx.current.resume();
   };
 
   const joinRoom = async (selectedRoom: any) => {
-    await unlockAudio(); // 폰에서 입장 버튼 누를 때 오디오 잠금 해제
+    await unlockAudio();
     setRoom(selectedRoom.name);
     setJoined(true);
-    
-    const syncConfig = { 
-      bpm: selectedRoom.bpm || 80, 
-      isPlaying: selectedRoom.is_playing || false, 
-      startTime: selectedRoom.start_time || 0 
-    };
+    const syncConfig = { bpm: selectedRoom.bpm, isPlaying: selectedRoom.is_playing, startTime: selectedRoom.start_time };
     setConfig(syncConfig);
     if (syncConfig.isPlaying) startSyncedAudio(syncConfig);
   };
 
   useEffect(() => {
     if (!joined || !room) return;
-    if (!pusherRef.current) {
-      pusherRef.current = new Pusher("48da82b32a9dc96e8fbe", { cluster: "ap3" });
-    }
+    if (!pusherRef.current) pusherRef.current = new Pusher("48da82b32a9dc96e8fbe", { cluster: "ap3" });
     const channel = pusherRef.current.subscribe(`team-${room}`);
     
     channel.bind('sync-event', (data: any) => {
       const newConfig = { bpm: Number(data.bpm), isPlaying: data.isPlaying, startTime: data.startTime };
       setConfig(newConfig);
-      if (data.isPlaying) startSyncedAudio(newConfig); else stopAudio();
+      if (newConfig.isPlaying) startSyncedAudio(newConfig); else stopAudio();
     });
 
     return () => { stopAudio(); pusherRef.current?.unsubscribe(`team-${room}`); };
@@ -77,16 +63,13 @@ export default function MetronomePage() {
   const startSyncedAudio = (c: any) => {
     stopAudio();
     const secondsPerBeat = 60 / c.bpm;
-    
     const scheduler = () => {
       const serverNow = Date.now() / 1000;
       const elapsed = serverNow - c.startTime;
       const beatsElapsed = Math.floor(elapsed / secondsPerBeat);
       const timeUntilNextBeat = ((beatsElapsed + 1) * secondsPerBeat) - elapsed;
-      
       nextBeatTimeRef.current = audioCtx.current!.currentTime + timeUntilNextBeat;
       let beatCounter = (beatsElapsed + 1) % 4;
-
       const run = () => {
         while (nextBeatTimeRef.current < audioCtx.current!.currentTime + 0.1) {
           playTick(nextBeatTimeRef.current, beatCounter);
@@ -114,12 +97,18 @@ export default function MetronomePage() {
     osc.start(t); osc.stop(t + 0.1);
   };
 
-  const stopAudio = () => { if (timerRef.current) clearTimeout(timerRef.current); setCurrentBeat(-1); };
+  const stopAudio = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setCurrentBeat(-1);
+  };
 
   const send = async (v: any) => {
     await unlockAudio();
-    const startTime = v.isPlaying ? (Date.now() / 1000) : 0;
-    const updated = { ...config, ...v, startTime };
+    const isNowPlaying = v.isPlaying !== undefined ? v.isPlaying : config.isPlaying;
+    const currentBpm = v.bpm !== undefined ? v.bpm : config.bpm;
+    const startTime = isNowPlaying ? (config.startTime || Date.now() / 1000) : 0;
+    
+    const updated = { bpm: currentBpm, isPlaying: isNowPlaying, startTime: isNowPlaying ? (startTime || Date.now() / 1000) : 0 };
     setConfig(updated);
 
     await supabase.from('rooms').update({ 
@@ -132,16 +121,16 @@ export default function MetronomePage() {
   if (!joined) {
     return (
       <main style={{ minHeight: '100dvh', backgroundColor: '#F1F3F5', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '40px 24px' }}>
-        <h1 style={{ fontSize: '11px', letterSpacing: '8px', color: '#ADB5BD', marginBottom: '60px' }}>BAND SYNC PRO</h1>
+        <h1 style={{ fontSize: '11px', letterSpacing: '8px', color: '#ADB5BD', marginBottom: '60px' }}>SHARE METRONOME</h1>
         <div style={{ width: '100%', maxWidth: '360px' }}>
           <div style={{ display: 'flex', gap: '12px', marginBottom: '40px', borderBottom: '1.5px solid #DEE2E6' }}>
-            <input type="text" placeholder="TEAM NAME" onChange={e => setRoom(e.target.value)} style={{ flex: 1, background: 'transparent', border: 'none', padding: '10px' }} />
-            <button onClick={() => supabase.from('rooms').insert([{ name: room, bpm: 80, is_playing: false, start_time: 0 }]).then(fetchRooms)} style={{ background: '#212529', color: '#FFF', border: 'none', padding: '10px 20px', borderRadius: '4px' }}>CREATE</button>
+            <input type="text" placeholder="TEAM NAME" onChange={e => setRoom(e.target.value)} style={{ flex: 1, background: 'transparent', border: 'none', padding: '10px', outline: 'none' }} />
+            <button onClick={() => supabase.from('rooms').insert([{ name: room, bpm: 80, is_playing: false, start_time: 0 }]).then(fetchRooms)} style={{ background: '#212529', color: '#FFF', border: 'none', padding: '10px 20px', borderRadius: '4px', cursor: 'pointer' }}>CREATE</button>
           </div>
           {rooms.map(r => (
-            <div key={r.id} onClick={() => joinRoom(r)} style={{ background: '#FFF', padding: '20px', borderRadius: '12px', marginBottom: '10px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }}>
+            <div key={r.id} onClick={() => joinRoom(r)} style={{ background: '#FFF', padding: '20px', borderRadius: '12px', marginBottom: '10px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', border: '1px solid #E9ECEF' }}>
               <span style={{ fontWeight: '700' }}>{r.name}</span>
-              <span style={{ color: r.is_playing ? '#40C057' : '#ADB5BD' }}>{r.is_playing ? '● ON' : 'OFF'}</span>
+              <span style={{ color: r.is_playing ? '#40C057' : '#ADB5BD', fontSize: '12px', fontWeight: 'bold' }}>{r.is_playing ? '● ON' : 'OFF'}</span>
             </div>
           ))}
         </div>
@@ -151,16 +140,16 @@ export default function MetronomePage() {
 
   return (
     <main style={{ minHeight: '100dvh', backgroundColor: '#F1F3F5', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-      <span onClick={() => { stopAudio(); setJoined(false); }} style={{ cursor: 'pointer', color: '#ADB5BD', marginBottom: '20px' }}>← BACK</span>
-      <h2 style={{ fontSize: '30px', marginBottom: '30px' }}>{room.toUpperCase()}</h2>
+      <span onClick={() => { stopAudio(); setJoined(false); }} style={{ cursor: 'pointer', color: '#ADB5BD', fontWeight: 'bold' }}>← BACK TO LIST</span>
+      <h2 style={{ fontSize: '30px', margin: '30px 0', fontWeight: '800' }}>{room.toUpperCase()}</h2>
       <div style={{ display: 'flex', gap: '15px', marginBottom: '40px' }}>
         {[0, 1, 2, 3].map(i => (
-          <div key={i} style={{ width: '50px', height: '50px', borderRadius: '50%', background: currentBeat === i ? '#212529' : '#FFF', border: '2px solid #DEE2E6' }} />
+          <div key={i} style={{ width: '50px', height: '50px', borderRadius: '50%', background: currentBeat === i ? '#212529' : '#FFF', border: '2px solid #DEE2E6', transition: '0.05s' }} />
         ))}
       </div>
-      <div style={{ fontSize: '80px', fontWeight: '100' }}>{config.bpm}</div>
-      <input type="range" min="40" max="240" value={config.bpm} onChange={e => send({ bpm: Number(e.target.value), isPlaying: config.isPlaying })} style={{ width: '200px', margin: '30px 0' }} />
-      <button onClick={() => send({ isPlaying: !config.isPlaying })} style={{ width: '80px', height: '80px', borderRadius: '50%', background: config.isPlaying ? '#212529' : 'white', color: config.isPlaying ? 'white' : 'black', border: '1px solid black' }}>
+      <div style={{ fontSize: '100px', fontWeight: '100', marginBottom: '20px' }}>{config.bpm}</div>
+      <input type="range" min="40" max="240" value={config.bpm} onChange={e => send({ bpm: Number(e.target.value) })} style={{ width: '80%', maxWidth: '300px', accentColor: '#212529', marginBottom: '40px' }} />
+      <button onClick={() => send({ isPlaying: !config.isPlaying })} style={{ width: '90px', height: '90px', borderRadius: '50%', background: config.isPlaying ? '#212529' : 'transparent', color: config.isPlaying ? 'white' : '#212529', border: '2px solid #212529', fontWeight: 'bold', cursor: 'pointer' }}>
         {config.isPlaying ? 'STOP' : 'PLAY'}
       </button>
     </main>
