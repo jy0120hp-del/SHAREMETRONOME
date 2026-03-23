@@ -36,37 +36,51 @@ export default function MetronomePage() {
     if (audioCtx.current.state === 'suspended') await audioCtx.current.resume();
   };
 
+  // 📡 [핵심] Pusher로부터 온 모든 변화(BPM, 재생상태)를 즉시 반영
   useEffect(() => {
     if (!joined || !room) return;
     if (!pusherRef.current) pusherRef.current = new Pusher("48da82b32a9dc96e8fbe", { cluster: "ap3" });
     const channel = pusherRef.current.subscribe(`team-${room}`);
+    
     channel.bind('sync-event', (data: any) => {
-      setConfig({ bpm: Number(data.bpm), isPlaying: data.isPlaying, startTime: data.startTime });
+      const newConfig = { bpm: Number(data.bpm), isPlaying: data.isPlaying, startTime: data.startTime };
+      setConfig(newConfig);
     });
+
     return () => { pusherRef.current?.unsubscribe(`team-${room}`); };
   }, [joined, room]);
 
+  // 🔊 상태 감시자: 남이 바꾸든 내가 바꾸든 소리를 재설정
   useEffect(() => {
-    if (joined && config.isPlaying) startSyncedAudio(config);
-    else stopAudio();
+    if (joined && config.isPlaying && config.startTime > 0) {
+      startSyncedAudio(config);
+    } else {
+      stopAudio();
+    }
   }, [config.isPlaying, config.bpm, config.startTime, joined]);
 
   const startSyncedAudio = (c: any) => {
-    stopAudio(); 
+    stopAudio();
     if (!audioCtx.current) return;
+
     const secondsPerBeat = 60 / c.bpm;
     const scheduler = () => {
       const serverNow = Date.now() / 1000;
       const elapsed = serverNow - c.startTime;
-      const beatsElapsed = Math.floor(elapsed / secondsPerBeat);
-      const timeUntilNextBeat = ((beatsElapsed + 1) * secondsPerBeat) - elapsed;
+      
+      // 🎯 [핵심] 현재 시간이 시작 시간으로부터 몇 번째 박자인지 정확히 계산 (강박 동기화)
+      const totalBeatsElapsed = Math.floor(elapsed / secondsPerBeat);
+      const timeUntilNextBeat = ((totalBeatsElapsed + 1) * secondsPerBeat) - elapsed;
+      
       nextBeatTimeRef.current = audioCtx.current!.currentTime + timeUntilNextBeat;
-      let beatCounter = (beatsElapsed + 1) % 4;
+      let beatCounter = (totalBeatsElapsed + 1) % 4; // 다음 박자의 인덱스 (0,1,2,3)
+
       const run = () => {
         while (nextBeatTimeRef.current < audioCtx.current!.currentTime + 0.1) {
-          playTick(nextBeatTimeRef.current, beatCounter);
           const b = beatCounter;
+          playTick(nextBeatTimeRef.current, b);
           setTimeout(() => setCurrentBeat(b), Math.max(0, (nextBeatTimeRef.current - audioCtx.current!.currentTime) * 1000));
+          
           nextBeatTimeRef.current += secondsPerBeat;
           beatCounter = (beatCounter + 1) % 4;
         }
@@ -81,6 +95,7 @@ export default function MetronomePage() {
     const osc = audioCtx.current!.createOscillator();
     const g = audioCtx.current!.createGain();
     osc.connect(g); g.connect(audioCtx.current!.destination);
+    // 0번 박자일 때만 높은 음(880Hz), 나머지는 낮은 음(440Hz)
     osc.frequency.setValueAtTime(b === 0 ? 880 : 440, t);
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(0.2, t + 0.005);
@@ -93,7 +108,7 @@ export default function MetronomePage() {
     setCurrentBeat(-1);
   };
 
-  // 🛠️ [터치 먹통 해결] 인자를 더 명확하게 처리함
+  // 🛠️ 조작 함수: DB 업데이트와 Pusher 전송을 한 번에!
   const send = async (action: 'TOGGLE' | 'BPM', value?: number) => {
     await unlockAudio();
     
@@ -106,13 +121,17 @@ export default function MetronomePage() {
       nextStartTime = nextIsPlaying ? Date.now() / 1000 : 0;
     } else if (action === 'BPM' && value) {
       nextBpm = value;
-      // 재생 중일 때 속도를 바꿔도 기존 startTime을 유지해야 박자가 안 튐
+      // 속도를 바꿀 때 재생 중이면 현재 박자 흐름을 깨지 않기 위해 startTime 유지
       if (!nextIsPlaying) nextStartTime = 0;
+      else nextStartTime = Date.now() / 1000; // 속도 변경 시 기준점을 현재로 재설정하여 즉각 반영
     }
 
     const updated = { bpm: nextBpm, isPlaying: nextIsPlaying, startTime: nextStartTime };
+    
+    // 로컬 상태 먼저 업데이트 (빠른 반응)
     setConfig(updated);
 
+    // DB & Pusher 동시 업데이트
     await supabase.from('rooms').update({ 
       bpm: updated.bpm, is_playing: updated.isPlaying, start_time: updated.startTime 
     }).eq('name', room);
@@ -168,9 +187,7 @@ export default function MetronomePage() {
         ))}
       </div>
       <div style={{ fontSize: '100px', fontWeight: '100', marginBottom: '20px' }}>{config.bpm}</div>
-      {/* 🛠️ 슬라이더 터치 제어 수정 */}
       <input type="range" min="40" max="240" value={config.bpm} onChange={e => send('BPM', Number(e.target.value))} style={{ width: '200px', accentColor: '#212529', marginBottom: '40px' }} />
-      {/* 🛠️ 버튼 터치 제어 수정 */}
       <button onClick={() => send('TOGGLE')} style={{ width: '90px', height: '90px', borderRadius: '50%', background: config.isPlaying ? '#212529' : 'transparent', color: config.isPlaying ? 'white' : '#212529', border: '2px solid #212529', fontWeight: 'bold', cursor: 'pointer' }}>
         {config.isPlaying ? 'STOP' : 'PLAY'}
       </button>
